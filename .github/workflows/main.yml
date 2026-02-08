@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '*/30 * * * *'  # 每 30 分鐘執行一次
   workflow_dispatch:        # 允許手動點擊按鈕執行
+  push:                     # 每次上傳程式碼時也自動執行一次 (方便測試)
+    branches: [ "main" ]
 
 permissions:
   contents: write           # 允許機器人寫入檔案 (為了儲存 seen_deals.json)
