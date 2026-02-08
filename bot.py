@@ -4,12 +4,13 @@ import json
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # 載入 .env 檔案 (本地開發用)
 load_dotenv()
 
 # ===== 設定區（請填入你自己的資訊）=====
-# 優先讀取環境變數 (GitHub Actions 或 .env)，若未設定則為空 (避免上傳 Key)
+# 優先讀取環境變數 (GitHub Actions 或 .env)，若未設定則為空
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 ITAD_API_KEY = os.environ.get("ITAD_API_KEY", "")
 
@@ -40,6 +41,10 @@ def save_seen(seen):
 
 def get_free_games_itad():
     """從 IsThereAnyDeal 取得 Steam 上 100% 折扣的遊戲"""
+    if not ITAD_API_KEY:
+        log("未設定 ITAD_API_KEY，跳過 ITAD 檢查")
+        return []
+
     url = "https://api.isthereanydeal.com/deals/list/v2"
     params = {
         "key": ITAD_API_KEY,
@@ -80,7 +85,7 @@ def get_free_games_itad():
 
 
 def get_free_games_steam():
-    """備用方案：直接從 Steam API 抓取"""
+    """備用方案：直接從 Steam API 抓取 (精選分類)"""
     url = "https://store.steampowered.com/api/featuredcategories"
 
     try:
@@ -110,6 +115,81 @@ def get_free_games_steam():
     return free_games
 
 
+def get_free_games_steam_search():
+    """地毯式搜索：直接爬取 Steam 搜尋結果 (抓漏網之魚)"""
+    # 搜尋條件：特價中 + 價格從低到高排序
+    url = "https://store.steampowered.com/search/results/"
+    params = {
+        "query": "",
+        "start": 0,
+        "count": 50,
+        "dynamic_data": "",
+        "sort_by": "Price_ASC",
+        "specials": 1,
+        "infinite": 1
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        
+        # Steam 搜尋 API 返回的是 JSON，其中 'results_html' 包含 HTML 片段
+        data = resp.json()
+        html_content = data.get("results_html", "")
+        
+        soup = BeautifulSoup(html_content, "html.parser")
+        games = []
+        
+        # 遍歷每一個搜尋結果
+        for item in soup.find_all("a", class_="search_result_row"):
+            try:
+                # 檢查折扣趴數
+                discount_div = item.find("div", class_="search_discount")
+                if not discount_div:
+                    continue
+                    
+                discount_text = discount_div.get_text(strip=True) # 例如 "-100%"
+                
+                # 嚴格判定：必須是 -100%
+                if "-100%" in discount_text:
+                    game_id = item.get("data-ds-appid")
+                    title_span = item.find("span", class_="title")
+                    title = title_span.get_text(strip=True) if title_span else "未知遊戲"
+                    
+                    # 取得連結
+                    store_url = item.get("href", "")
+                    # 去除連結中的 tracking 參數
+                    if "?" in store_url:
+                        store_url = store_url.split("?")[0]
+
+                    # 取得原價
+                    price_div = item.find("strike")
+                    original_price = 0
+                    if price_div:
+                        price_str = price_div.get_text(strip=True).replace("$", "").replace(",", "")
+                        try:
+                            original_price = float(price_str)
+                        except:
+                            original_price = 0
+                            
+                    games.append({
+                        "id": game_id,
+                        "name": title,
+                        "original_price": original_price,
+                        "url": store_url,
+                        "header_image": get_game_header_image(game_id)
+                    })
+            except Exception as e:
+                log(f"解析遊戲出錯: {e}")
+                continue
+                
+        return games
+
+    except Exception as e:
+        log(f"Steam 地毯式搜索錯誤: {e}")
+        return []
+
+
 def get_game_header_image(app_id):
     """取得遊戲的封面圖片"""
     return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
@@ -117,6 +197,10 @@ def get_game_header_image(app_id):
 
 def send_discord_notification(game):
     """發送 Discord 通知"""
+    if not DISCORD_WEBHOOK_URL:
+        log("未設定 Webhook URL，跳過通知")
+        return
+
     # 嘗試取得封面圖
     image_url = game.get("header_image", "")
     if not image_url and game.get("id", "").isdigit():
@@ -171,10 +255,13 @@ def send_discord_notification(game):
 
 def send_startup_message():
     """機器人啟動通知"""
+    if not DISCORD_WEBHOOK_URL:
+        return
+
     payload = {
         "embeds": [{
             "title": "🤖 Steam 免費遊戲通知機器人已啟動",
-            "description": f"每 {CHECK_INTERVAL // 60} 分鐘檢查一次 Steam 免費遊戲",
+            "description": f"每 {CHECK_INTERVAL // 60} 分鐘檢查一次 Steam 免費遊戲 (含地毯式搜索)",
             "color": 0x3498db,
             "footer": {
                 "text": datetime.now().strftime("%Y/%m/%d %H:%M:%S")
@@ -189,7 +276,7 @@ def send_startup_message():
 
 def main():
     log("=" * 50)
-    log("Steam 免費遊戲通知機器人啟動中...")
+    log("Steam 免費遊戲通知機器人啟動中... (已啟用地毯式搜索)")
     log(f"檢查間隔: {CHECK_INTERVAL} 秒 ({CHECK_INTERVAL // 60} 分鐘)")
     log("=" * 50)
     
@@ -206,20 +293,31 @@ def main():
     while True:
         log("開始檢查免費遊戲...")
 
-        # 主要來源：IsThereAnyDeal
+        # 1. IsThereAnyDeal
         free_games = get_free_games_itad()
         log(f"ITAD 找到 {len(free_games)} 款免費遊戲")
 
-        # 備用來源：Steam 官方
+        # 2. Steam 官方 (精選分類)
         steam_games = get_free_games_steam()
-        log(f"Steam 找到 {len(steam_games)} 款免費遊戲")
+        log(f"Steam (官方API) 找到 {len(steam_games)} 款免費遊戲")
+        
+        # 3. Steam 地毯式搜索 (新功能)
+        search_games = get_free_games_steam_search()
+        log(f"Steam (地毯搜索) 找到 {len(search_games)} 款免費遊戲")
 
         # 合併結果（用遊戲名稱去重）
         all_games = {}
-        for game in free_games + steam_games:
+        # 合併順序：API -> ITAD -> 搜索 (確保資訊最豐富的優先)
+        for game in steam_games + free_games + search_games:
             key = game.get("name", game.get("id", ""))
-            if key and key not in all_games:
-                all_games[key] = game
+            # 用 ID 當 Key 比較準，如果沒有 ID 才用 Name
+            game_id = game.get("id")
+            if game_id and game_id not in all_games:
+                 all_games[game_id] = game
+            elif key and key not in all_games:
+                 all_games[key] = game
+        
+        log(f"去除重複後共 {len(all_games)} 款遊戲")
 
         new_count = 0
         for key, game in all_games.items():
