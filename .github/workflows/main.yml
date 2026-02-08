@@ -1,0 +1,44 @@
+name: Steam Free Games Bot
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 每 30 分鐘執行一次
+  workflow_dispatch:        # 允許手動點擊按鈕執行
+
+permissions:
+  contents: write           # 允許機器人寫入檔案 (為了儲存 seen_deals.json)
+
+jobs:
+  check-games:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Bot
+      env:
+        # 這裡的變數會從 GitHub Secrets 讀取 (安全性較高)
+        # 如果沒設定 Secrets，程式會用 bot.py 裡預設的 (不建議公開 Repo 這樣做)
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        ITAD_API_KEY: ${{ secrets.ITAD_API_KEY }}
+        RUN_ONCE: "true" # 告訴程式只跑一次就停
+      run: python bot.py
+
+    - name: Commit and Push changes
+      # 如果 seen_deals.json 有變動 (有新遊戲)，就存檔回去
+      run: |
+        git config --global user.name "GitHub Action Bot"
+        git config --global user.email "action@github.com"
+        git add seen_deals.json
+        git commit -m "Update seen deals [skip ci]" || exit 0
+        git push
