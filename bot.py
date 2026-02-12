@@ -121,79 +121,117 @@ def get_free_games_steam():
 
 
 def get_free_games_steam_search():
-    """地毯式搜索：直接爬取 Steam 搜尋結果 (抓漏網之魚)"""
-    # 搜尋條件：特價中 + 價格從低到高排序
-    # 增加 count 到 100 以抓取更多結果
+    """地毯式搜索：直接爬取 Steam 搜尋結果 (無限翻頁直到找到付費遊戲為止)"""
     url = "https://store.steampowered.com/search/results/"
-    params = {
-        "query": "",
-        "start": 0,
-        "count": 100, 
-        "dynamic_data": "",
-        "sort_by": "Price_ASC",
-        "specials": 1,
-        "infinite": 1
-    }
+    found_games = []
+    start = 0
+    batch_size = 50
+    # 安全上限：避免無限迴圈 (例如 Steam 排序壞掉時)
+    max_search_count = 2000 
 
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        
-        # Steam 搜尋 API 返回的是 JSON，其中 'results_html' 包含 HTML 片段
-        data = resp.json()
-        html_content = data.get("results_html", "")
-        
-        soup = BeautifulSoup(html_content, "html.parser")
-        games = []
-        
-        # 遍歷每一個搜尋結果
-        for item in soup.find_all("a", class_="search_result_row"):
-            try:
-                # 檢查折扣趴數
-                discount_div = item.find("div", class_="search_discount")
-                if not discount_div:
-                    continue
-                    
-                discount_text = discount_div.get_text(strip=True) # 例如 "-100%"
-                
-                # 嚴格判定：必須是 -100%
-                if "-100%" in discount_text:
-                    game_id = item.get("data-ds-appid")
+    while start < max_search_count:
+        params = {
+            "query": "",
+            "start": start,
+            "count": batch_size,
+            "dynamic_data": "",
+            "sort_by": "Price_ASC", # 價格低 -> 高
+            "specials": 1,          # 只看特價品
+            "infinite": 1
+        }
+
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            html_content = data.get("results_html", "")
+            
+            if not html_content.strip():
+                # 沒有更多結果了
+                break
+            
+            soup = BeautifulSoup(html_content, "html.parser")
+            items = soup.find_all("a", class_="search_result_row")
+            
+            if not items:
+                break
+
+            current_batch_paid_count = 0
+
+            for item in items:
+                try:
+                    # 1. 取得標題
                     title_span = item.find("span", class_="title")
                     title = title_span.get_text(strip=True) if title_span else "未知遊戲"
                     
-                    # 取得連結
-                    store_url = item.get("href", "")
-                    # 去除連結中的 tracking 參數
-                    if "?" in store_url:
-                        store_url = store_url.split("?")[0]
-
-                    # 取得原價
-                    price_div = item.find("strike")
+                    # 2. 判斷價格
+                    # Steam 搜尋結果可能有:
+                    # - <div class="col search_price discounted">... <strike>$10.00</strike> $0.00</div>
+                    # - <div class="col search_price">Free</div> (這種通常是 F2P，雖然我們濾了 specials=1 但有時會出現)
+                    
+                    discount_div = item.find("div", class_="search_discount")
+                    price_div = item.find("div", class_="search_price") 
+                    
+                    is_free = False
                     original_price = 0
-                    if price_div:
-                        price_str = price_div.get_text(strip=True).replace("$", "").replace(",", "")
-                        try:
-                            original_price = float(price_str)
-                        except:
-                            original_price = 0
-                            
-                    games.append({
-                        "id": game_id,
-                        "name": title,
-                        "original_price": original_price,
-                        "url": store_url,
-                        "header_image": get_game_header_image(game_id)
-                    })
-            except Exception as e:
-                log(f"解析遊戲出錯: {e}")
-                continue
-                
-        return games
 
-    except Exception as e:
-        log(f"Steam 地毯式搜索錯誤: {e}")
-        return []
+                    # 檢查折扣趴數 (最準確)
+                    if discount_div:
+                        discount_text = discount_div.get_text(strip=True)
+                        if "-100%" in discount_text:
+                            is_free = True
+                            
+                            # 抓原價
+                            try:
+                                strike = price_div.find("strike")
+                                if strike:
+                                    price_str = strike.get_text(strip=True).replace("$", "").replace(",", "")
+                                    original_price = float(price_str)
+                            except:
+                                pass
+                    
+                    # 如果不是免費，且價格大於 0，表示我們已經查完所有免費遊戲了
+                    # (因為是 Price_ASC 排序，一旦出現要錢的，後面肯定都要錢)
+                    if not is_free:
+                        # 檢查現價
+                        # 注意：有些 Bundle 如果價格算不出來可能是空字串，要小心處理
+                        if price_div:
+                            current_price_text = price_div.get_text(strip=True)
+                            # 如果包含數字且不包含 "Free" Or "100%"
+                            if any(char.isdigit() for char in current_price_text) and "Free" not in current_price_text:
+                                current_batch_paid_count += 1
+                        continue
+
+                    # 是目標！加入清單
+                    if is_free:
+                        game_id = item.get("data-ds-appid")
+                        store_url = item.get("href", "").split("?")[0]
+                        
+                        found_games.append({
+                            "id": game_id,
+                            "name": title,
+                            "original_price": original_price,
+                            "url": store_url,
+                            "header_image": get_game_header_image(game_id)
+                        })
+
+                except Exception as e:
+                    continue
+            
+            # 如果這一批已經出現超過一半是付費遊戲，或者全是付費遊戲，就停止搜索
+            if current_batch_paid_count > 0:
+                log(f"搜尋到索引 {start}，發現付費遊戲，停止搜索。")
+                break
+                
+            start += batch_size
+            time.sleep(1) # 禮貌性延遲
+
+        except Exception as e:
+            log(f"Steam 地毯式搜索翻頁錯誤 (start={start}): {e}")
+            break
+            
+    return found_games
 
 
 def get_game_header_image(app_id):
