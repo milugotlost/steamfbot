@@ -9,6 +9,11 @@ from bs4 import BeautifulSoup
 # 載入 .env 檔案 (本地開發用)
 load_dotenv()
 
+# 偽裝成瀏覽器，避免被 Steam 擋掉
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 # ===== 設定區（請填入你自己的資訊）=====
 # 優先讀取環境變數 (GitHub Actions 或 .env)，若未設定則為空
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -55,7 +60,7 @@ def get_free_games_itad():
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -89,7 +94,7 @@ def get_free_games_steam():
     url = "https://store.steampowered.com/api/featuredcategories"
 
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -118,11 +123,12 @@ def get_free_games_steam():
 def get_free_games_steam_search():
     """地毯式搜索：直接爬取 Steam 搜尋結果 (抓漏網之魚)"""
     # 搜尋條件：特價中 + 價格從低到高排序
+    # 增加 count 到 100 以抓取更多結果
     url = "https://store.steampowered.com/search/results/"
     params = {
         "query": "",
         "start": 0,
-        "count": 50,
+        "count": 100, 
         "dynamic_data": "",
         "sort_by": "Price_ASC",
         "specials": 1,
@@ -130,7 +136,7 @@ def get_free_games_steam_search():
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         
         # Steam 搜尋 API 返回的是 JSON，其中 'results_html' 包含 HTML 片段
@@ -253,27 +259,6 @@ def send_discord_notification(game):
         log(f"❌ 發送錯誤: {e}")
 
 
-def send_startup_message():
-    """機器人啟動通知"""
-    if not DISCORD_WEBHOOK_URL:
-        return
-
-    payload = {
-        "embeds": [{
-            "title": "🤖 Steam 免費遊戲通知機器人已啟動",
-            "description": f"每 {CHECK_INTERVAL // 60} 分鐘檢查一次 Steam 免費遊戲 (含地毯式搜索)",
-            "color": 0x3498db,
-            "footer": {
-                "text": datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-            }
-        }]
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-    except Exception:
-        pass
-
-
 def main():
     log("=" * 50)
     log("Steam 免費遊戲通知機器人啟動中... (已啟用地毯式搜索)")
@@ -288,7 +273,7 @@ def main():
         if datetime.fromisoformat(v.get("found_at", datetime.now().isoformat())).timestamp() > cutoff
     }
 
-    send_startup_message()
+    # 已移除重複的啟動通知
 
     while True:
         log("開始檢查免費遊戲...")
